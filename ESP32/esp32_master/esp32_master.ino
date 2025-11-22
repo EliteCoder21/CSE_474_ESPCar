@@ -8,61 +8,116 @@
 #define ECHO_PIN 18
 #define ALARM_PIN 4
 
+// Define distance thresholds in centimeters
+#define CRITICAL_THRESHOLD 10
+#define OBSTACLE_THRESHOLD 20
+
 // Set up serial connection to Arduino Mega (motor slave)
-HardwareSerial SerialMega(2); // UART2, GPIO16=RX, GPIO17=TX (adjust for your board)
+HardwareSerial SerialMega(2); 
+
+// Setup Distance Variable
+int measuredDistanceCm = 50;
+int leftMeasuredDistanceCm = 50;
+int rightMeasuredDistanceCm = 50;
+
+// Setup best direction variable
+int bestDirection = 1; // 0 is for left
+                       // 1 is for forward
+                       // 2 is for right                       
 
 // Setup Semaphores for safety tracking
-SemaphoreHandle_t xSafetySemaphore = NULL;
+SemaphoreHandle_t distanceMutex  = NULL;
+SemaphoreHandle_t directionMutex = NULL;
 
 // Setup Task handles for tasks
-TaskHandle_t alarmTaskHandle = NULL;
-TaskHandle_t driveTaskHandle = NULL;
-
-// Task to run the alarm
-void alarmTask(void *parameter) {
-  while (1) {
-    // Wait indefinitely for someone to give the semaphore
-    if (xSemaphoreTake(xSafetySemaphore, portMAX_DELAY) == pdTRUE) {
-
-      // Turn buzzer on
-      digitalWrite(ALARM_PIN, HIGH);
-      vTaskDelay(pdMS_TO_TICKS(100));
-      digitalWrite(ALARM_PIN, LOW);
-      vTaskDelay(pdMS_TO_TICKS(100));
-    }
-  }
-}
-
-// Task to drive around
-void driveTask(void *parameter) {
-  while (1) {
-    
-    // Drive around
-    SerialMega.println("FORWARD");
-    vTaskDelay(pdMS_TO_TICKS(500));
-    SerialMega.println("STOP");
-    vTaskDelay(pdMS_TO_TICKS(50));
-
-/*
-    SerialMega.println("LEFT");
-    delay(1000);
-
-    SerialMega.println("RIGHT");
-    delay(1000);
-
-    SerialMega.println("BACKWARD");
-    delay(2000);
-
-    SerialMega.println("STOP");
-    delay(3000);
-*/
-  }
-}
+TaskHandle_t sensorTaskHandle = NULL;
+TaskHandle_t decisionTaskHandle = NULL;
 
 // Driving Decision Task
+void decisionTask(void *parameter) {
 
+  // Get the distance measured by the ultrasonic sensor
+  int currentDist;
+  if (xSemaphoreTake(distanceMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+    currentDist = measuredDistanceCm;
+    xSemaphoreGive(distanceMutex);
+  } else {
+    currentDist = 100;
+  }
 
+  // Make the Decision
+  if (currentDist <= CRITICAL_THRESHOLD) {
 
+    // Debugging
+    Serial.println("Proximity Alert! Backtracking...")
+
+    // Go back if we see something really close
+    SerialMega.println("BACKWARD");       
+
+  } else if (currentDist <= OBSTACLE_THRESHOLD) {
+
+    // Debugging
+    Serial.println("Obstacle Alert! Scanning for optimal route...")
+
+    // Scan around to find a safe path
+
+    // Scan left
+    SerialMega.println("LEFT");
+    vTaskDelay(pdMS_TO_TICKS(1000));
+
+    // Record distance
+    leftMeasuredDistanceCm = readUltrasonicCM();
+
+    // Scan right
+    SerialMega.println("RIGHT");
+    vTaskDelay(pdMS_TO_TICKS(2000));
+   
+    // Record distance
+    rightMeasuredDistanceCm = readUltrasonicCM();    
+
+    // Position the rover appropriately
+    if (rightMeasuredDistanceCm < leftMeasuredDistanceCm) {
+      SerialMega.println("LEFT");
+      vTaskDelay(pdMS_TO_TICKS(2000));
+    }
+
+  } else {
+
+    // Debugging
+    Serial.println("All clear! Proceeding forward...")
+
+    SerialMega.println("FORWARD");    
+  }
+
+  // Task Wait
+  vTaskDelay(pdMS_TO_TICKS(500));
+}
+
+// Sensor task: periodically measures distance and updates shared variable
+void sensorTask(void* pvParameters) {
+  while (1) {
+
+    // Read the value
+    int d = readUltrasonicCM();
+
+    // Write the value
+    if (xSemaphoreTake(distanceMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+      measuredDistanceCm = d;
+      xSemaphoreGive(distanceMutex);
+    }
+
+    // Sound the alarm if necessary
+    if (d < CRITICAL_THRESHOLD) {
+      digitalWrite(ALARM_PIN, HIGH);
+      vTaskDelay(pdMS_TO_TICKS(200)); // 200 ms on
+      digitalWrite(ALARM_PIN, LOW);
+      vTaskDelay(pdMS_TO_TICKS(200)); // 200 ms off
+    }   
+    
+    // Delay if necessary
+    vTaskDelay(pdMS_TO_TICKS(100));
+  }
+}
 
 // Setup function
 void setup() {
@@ -76,10 +131,13 @@ void setup() {
   pinMode(ECHO_PIN, INPUT);
   pinMode(ALARM_PIN, INPUT);
 
+  // Create Mutex and give to Decision Task
+  distanceMutex = xSemaphoreCreateMutex();
+
   // Create Tasks
   xTaskCreatePinnedToCore(
-    driveTask,
-    "Drive",
+    decisionTask,
+    "Decision",
     4096,
     NULL,
     1,
@@ -88,12 +146,12 @@ void setup() {
   );
   
   xTaskCreatePinnedToCore(
-    alarmTask,
-    "Alarm",
+    sensorTask,
+    "Sensor",
     4096,
     NULL,
     1,
-    &alarmTaskHandle,
+    &sensorTaskHandle,
     1                       // core 1
   );
   
